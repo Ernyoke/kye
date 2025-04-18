@@ -7,6 +7,8 @@ This tool analyzes IAM Role trust policies and S3 bucket policies in your AWS ac
 - 🔍 Analyzes IAM Role trust policies to identify who can assume your roles
 - 🔍 Checks S3 bucket policies to identify who has access to your data
 - 📊 Uses reference data from [known AWS accounts](https://github.com/fwdcloudsec/known_aws_accounts) to identify vendors
+- 🔒 Supports defining your own trusted AWS accounts to distinguish between internal and external access
+- 🏷️ Automatically detects and displays AWS account aliases for better readability
 - 📝 Generates nice-looking console output with tables
 - 📄 Creates a markdown report you can share with your security team
 
@@ -36,6 +38,67 @@ This tool analyzes IAM Role trust policies and S3 bucket policies in your AWS ac
    export AWS_DEFAULT_REGION="your-region"
    ```
 
+## Required AWS Permissions
+
+To run this script successfully, your AWS user or role needs the following permissions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["iam:ListRoles", "iam:GetRole"],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListAllMyBuckets", "s3:GetBucketPolicy"],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["sts:GetCallerIdentity", "iam:ListAccountAliases"],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+You can use the AWS built-in policies:
+
+- `IAMReadOnlyAccess` - For IAM role analysis
+- `AmazonS3ReadOnlyAccess` - For S3 bucket policy analysis
+
+Or create a custom policy with just the permissions listed above for more restricted access.
+
+## Trusted Accounts Configuration
+
+You can define your own trusted AWS accounts to distinguish between your internal organization's accounts and external vendors. This helps you focus on identifying truly external access.
+
+1. Create a `trusted_accounts.yaml` file in the same directory as the script:
+
+   ```
+   cp trusted_accounts.yaml.sample trusted_accounts.yaml
+   ```
+
+2. Edit the file to include your organization's AWS accounts:
+
+   ```yaml
+   - name: "My Company Production"
+     description: "Production AWS accounts"
+     accounts:
+       - "123456789012"
+       - "234567890123"
+
+   - name: "My Company Development"
+     description: "Development AWS accounts"
+     accounts:
+       - "345678901234"
+   ```
+
+If the `trusted_accounts.yaml` file doesn't exist or is empty, the script will analyze all accounts as potential external access points.
+
 ## Usage
 
 Simply run the script:
@@ -47,10 +110,12 @@ python check.py
 The script will:
 
 1. Fetch the latest reference data of known AWS accounts
-2. Check all IAM role trust policies in your account
-3. Check all S3 bucket policies in your account
-4. Display the results in a nice format in the console
-5. Generate a markdown report file
+2. Load any trusted accounts from your configuration (if available)
+3. Get the current AWS account alias for better identification
+4. Check all IAM role trust policies in your account
+5. Check all S3 bucket policies in your account
+6. Display the results in a nice format in the console
+7. Generate a markdown report file
 
 ## Sample Output
 
@@ -64,9 +129,19 @@ The script will:
 
 Fetching reference data of known AWS accounts...
 ✅ Found 480 known AWS accounts in the reference data
+Loading trusted AWS accounts...
+✅ Loaded 5 trusted AWS accounts
+
+Analyzing AWS Account: 123456789012 (my-company-dev)
 
 Checking IAM role trust policies...
 Checking S3 bucket policies...
+
+┌─────────────── 🔒 Trusted Entities with IAM Role Access ───────────────┐
+│ Entity           │ IAM Roles                                          │
+│ ─────────────────┼────────────────────────────────────────────────    │
+│ My Company Prod  │ CrossAccountRole                                   │
+└──────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────── ✅ Known Vendors with IAM Role Access ───────────────┐
 │ Vendor           │ IAM Roles                                       │
@@ -82,6 +157,7 @@ Checking S3 bucket policies...
 
 ┌────────────────── AWS Account Analysis Results ─────────────────────┐
 │ Summary:                                                            │
+│ 🔒 Trusted entities found: 1                                        │
 │ 🔍 Known vendors found: 1                                           │
 │ ❓ Unknown AWS accounts found: 1                                     │
 └────────────────────────────────────────────────────────────────────┘
@@ -93,8 +169,10 @@ Checking S3 bucket policies...
 
 The generated markdown report will include:
 
+- Trusted entities with IAM role access
 - Known vendors with IAM role access
 - Unknown AWS accounts with IAM role access
+- Trusted entities with S3 bucket access
 - Known vendors with S3 bucket access
 - Unknown AWS accounts with S3 bucket access
 
