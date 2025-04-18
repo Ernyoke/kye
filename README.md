@@ -63,20 +63,20 @@ The script will:
 └────────────────────────────────────────────────────────────────┘
 
 Fetching reference data of known AWS accounts...
-✅ Found 47 known AWS accounts in the reference data
+✅ Found 480 known AWS accounts in the reference data
 
 Checking IAM role trust policies...
 Checking S3 bucket policies...
 
 ┌─────────────── ✅ Known Vendors with IAM Role Access ───────────────┐
-│ Vendor           │ IAM Roles                                        │
-│ ────────────────┼─────────────────────────────────────────────     │
+│ Vendor           │ IAM Roles                                       │
+│ ─────────────────┼─────────────────────────────────────────────    │
 │ Datadog          │ DatadogIntegrationRole                          │
 └────────────────────────────────────────────────────────────────────┘
 
 ┌───────────── ❓ Unknown AWS Accounts with IAM Role Access ─────────────┐
-│ AWS Account ID  │ IAM Roles                                            │
-│ ────────────────┼─────────────────────────────────────────────         │
+│ AWS Account ID  │ IAM Roles                                           │
+│ ────────────────┼─────────────────────────────────────────────        │
 │ 123456789012    │ SomeUnknownVendorRole                               │
 └────────────────────────────────────────────────────────────────────────┘
 
