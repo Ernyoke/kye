@@ -187,6 +187,50 @@ def extract_account_ids_from_policy(policy_document):
     return list(account_ids)
 
 
+def check_external_id_condition(policy_document):
+    """
+    Check if a trust policy has ExternalId condition to prevent confused deputy problem.
+
+    Args:
+        policy_document (dict): The policy document to analyze
+
+    Returns:
+        bool: True if ExternalId condition exists, False otherwise
+    """
+    if not policy_document or "Statement" not in policy_document:
+        return False
+
+    # Convert to list if it's a single statement
+    statements = policy_document["Statement"]
+    if not isinstance(statements, list):
+        statements = [statements]
+
+    for statement in statements:
+        if statement.get("Effect") != "Allow":
+            continue
+
+        # Check if the statement is for cross-account access
+        principal = statement.get("Principal", {})
+        if not isinstance(principal, dict):
+            continue
+
+        aws_principal = principal.get("AWS", "")
+        if not aws_principal:
+            continue
+
+        # Now check if there's a proper ExternalId condition
+        condition = statement.get("Condition", {})
+        if not condition:
+            return False
+
+        for condition_type, condition_values in condition.items():
+            if condition_type in ["StringEquals", "StringLike", "ArnLike"]:
+                if "sts:ExternalId" in condition_values:
+                    return True
+
+    return False
+
+
 def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_aliases):
     """
     Check IAM Role trust policies for known AWS accounts.
@@ -197,10 +241,11 @@ def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_a
         account_aliases (dict): Mapping of AWS account IDs to their aliases
 
     Returns:
-        tuple: (known_vendors, unknown_accounts, trusted_entities)
+        tuple: (known_vendors, unknown_accounts, trusted_entities, vulnerable_roles)
             known_vendors (dict): Dictionary mapping vendor names to lists of IAM role names
             unknown_accounts (dict): Dictionary mapping unknown account IDs to lists of IAM role names
             trusted_entities (dict): Dictionary mapping trusted entity names to lists of IAM role names
+            vulnerable_roles (dict): Dictionary mapping account IDs to roles without ExternalId conditions
     """
     console.print("[bold blue]Checking IAM role trust policies...[/bold blue]")
 
@@ -208,6 +253,7 @@ def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_a
     known_vendors = {}
     unknown_accounts = {}
     trusted_entities = {}
+    vulnerable_roles = {}
 
     try:
         paginator = iam_client.get_paginator("list_roles")
@@ -220,6 +266,10 @@ def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_a
                 account_ids = extract_account_ids_from_policy(trust_policy)
 
                 for account_id in account_ids:
+                    # Skip checking service roles (AWS services)
+                    if account_id == "":
+                        continue
+
                     # Check if account is in trusted zone
                     if account_id in trusted_accounts:
                         trusted_name = trusted_accounts[account_id]["name"]
@@ -232,6 +282,13 @@ def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_a
                         if vendor_name not in known_vendors:
                             known_vendors[vendor_name] = []
                         known_vendors[vendor_name].append(role_name)
+
+                        # Check for missing ExternalId condition for vendors
+                        has_external_id = check_external_id_condition(trust_policy)
+                        if not has_external_id:
+                            if vendor_name not in vulnerable_roles:
+                                vulnerable_roles[vendor_name] = []
+                            vulnerable_roles[vendor_name].append(role_name)
                     # Add to unknown accounts
                     else:
                         # Format account ID with alias if available
@@ -243,13 +300,20 @@ def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_a
                             unknown_accounts[display_id] = []
                         unknown_accounts[display_id].append(role_name)
 
-        return known_vendors, unknown_accounts, trusted_entities
+                        # Check for missing ExternalId condition for unknown accounts
+                        has_external_id = check_external_id_condition(trust_policy)
+                        if not has_external_id:
+                            if display_id not in vulnerable_roles:
+                                vulnerable_roles[display_id] = []
+                            vulnerable_roles[display_id].append(role_name)
+
+        return known_vendors, unknown_accounts, trusted_entities, vulnerable_roles
 
     except Exception as e:
         console.print(
             f"[bold red]Error checking IAM role trust policies: {str(e)}[/bold red]"
         )
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
 
 def check_s3_bucket_policies(account_to_vendor, trusted_accounts, account_aliases):
@@ -333,6 +397,7 @@ def generate_report(
     iam_known_vendors,
     iam_unknown_accounts,
     iam_trusted_entities,
+    iam_vulnerable_roles,
     s3_known_vendors,
     s3_unknown_accounts,
     s3_trusted_entities,
@@ -345,6 +410,7 @@ def generate_report(
         iam_known_vendors (dict): Known vendors found in IAM role trust policies
         iam_unknown_accounts (dict): Unknown accounts found in IAM role trust policies
         iam_trusted_entities (dict): Trusted entities found in IAM role trust policies
+        iam_vulnerable_roles (dict): Roles without ExternalId condition
         s3_known_vendors (dict): Known vendors found in S3 bucket policies
         s3_unknown_accounts (dict): Unknown accounts found in S3 bucket policies
         s3_trusted_entities (dict): Trusted entities found in S3 bucket policies
@@ -400,6 +466,20 @@ def generate_report(
             f.write("No unknown AWS accounts found in IAM role trust policies.\n")
         f.write("\n")
 
+        # Write vulnerable roles section (missing ExternalId)
+        f.write("## ⚠️ IAM Roles Missing ExternalId Condition\n\n")
+        f.write(
+            "These roles are vulnerable to the [confused deputy problem](https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html).\n\n"
+        )
+        if iam_vulnerable_roles:
+            f.write("| Entity | Vulnerable IAM Roles |\n")
+            f.write("|--------|--------------------|\n")
+            for entity, roles in iam_vulnerable_roles.items():
+                f.write(f"| {entity} | {', '.join(roles)} |\n")
+        else:
+            f.write("No vulnerable IAM roles found (good job!).\n")
+        f.write("\n")
+
         # Write S3 trusted entities section
         f.write("## Trusted Entities with S3 Bucket Access\n\n")
         if s3_trusted_entities:
@@ -439,6 +519,7 @@ def display_results(
     iam_known_vendors,
     iam_unknown_accounts,
     iam_trusted_entities,
+    iam_vulnerable_roles,
     s3_known_vendors,
     s3_unknown_accounts,
     s3_trusted_entities,
@@ -451,6 +532,7 @@ def display_results(
         iam_known_vendors (dict): Known vendors found in IAM role trust policies
         iam_unknown_accounts (dict): Unknown accounts found in IAM role trust policies
         iam_trusted_entities (dict): Trusted entities found in IAM role trust policies
+        iam_vulnerable_roles (dict): Roles without ExternalId condition
         s3_known_vendors (dict): Known vendors found in S3 bucket policies
         s3_unknown_accounts (dict): Unknown accounts found in S3 bucket policies
         s3_trusted_entities (dict): Trusted entities found in S3 bucket policies
@@ -507,6 +589,22 @@ def display_results(
 
         console.print(table)
 
+    # Display vulnerable roles table (missing ExternalId)
+    if iam_vulnerable_roles:
+        table = Table(
+            title="⚠️ IAM Roles Missing ExternalId Condition (Vulnerable to Confused Deputy)",
+            box=box.ROUNDED,
+        )
+        table.add_column("Entity", style="red")
+        table.add_column("Vulnerable IAM Roles", style="red")
+
+        for entity, roles in iam_vulnerable_roles.items():
+            table.add_row(
+                entity, "\n".join(roles[:5]) + ("\n..." if len(roles) > 5 else "")
+            )
+
+        console.print(table)
+
     # Display S3 trusted entities table
     if s3_trusted_entities:
         table = Table(
@@ -555,13 +653,15 @@ def display_results(
     total_trusted = len(iam_trusted_entities) + len(s3_trusted_entities)
     total_known = len(iam_known_vendors) + len(s3_known_vendors)
     total_unknown = len(iam_unknown_accounts) + len(s3_unknown_accounts)
+    total_vulnerable = len(iam_vulnerable_roles)
 
     console.print(
         Panel(
             f"[bold]Summary:[/bold]\n"
             f"🔒 [green]Trusted entities found:[/green] {total_trusted}\n"
             f"🔍 [cyan]Known vendors found:[/cyan] {total_known}\n"
-            f"❓ [yellow]Unknown AWS accounts found:[/yellow] {total_unknown}",
+            f"❓ [yellow]Unknown AWS accounts found:[/yellow] {total_unknown}\n"
+            f"⚠️ [red]Vulnerable IAM roles (missing ExternalId):[/red] {total_vulnerable}",
             title="AWS Account Analysis Results",
             box=box.ROUNDED,
         )
@@ -599,10 +699,13 @@ def main():
         account_aliases = get_account_aliases()
 
         # Check IAM role trust policies
-        iam_known_vendors, iam_unknown_accounts, iam_trusted_entities = (
-            check_iam_role_trust_policies(
-                account_to_vendor, trusted_accounts, account_aliases
-            )
+        (
+            iam_known_vendors,
+            iam_unknown_accounts,
+            iam_trusted_entities,
+            iam_vulnerable_roles,
+        ) = check_iam_role_trust_policies(
+            account_to_vendor, trusted_accounts, account_aliases
         )
 
         # Check S3 bucket policies
@@ -617,6 +720,7 @@ def main():
             iam_known_vendors,
             iam_unknown_accounts,
             iam_trusted_entities,
+            iam_vulnerable_roles,
             s3_known_vendors,
             s3_unknown_accounts,
             s3_trusted_entities,
@@ -628,6 +732,7 @@ def main():
             iam_known_vendors,
             iam_unknown_accounts,
             iam_trusted_entities,
+            iam_vulnerable_roles,
             s3_known_vendors,
             s3_unknown_accounts,
             s3_trusted_entities,

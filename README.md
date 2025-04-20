@@ -9,6 +9,7 @@ This tool analyzes IAM Role trust policies and S3 bucket policies in your AWS ac
 - 📊 Uses reference data from [known AWS accounts](https://github.com/fwdcloudsec/known_aws_accounts) to identify vendors
 - 🔒 Supports defining your own trusted AWS accounts to distinguish between internal and external access
 - 🏷️ Automatically detects and displays AWS account aliases for better readability
+- ⚠️ Identifies IAM roles vulnerable to the confused deputy problem (missing ExternalId condition)
 - 📝 Generates nice-looking console output with tables
 - 📄 Creates a markdown report you can share with your security team
 
@@ -99,6 +100,14 @@ You can define your own trusted AWS accounts to distinguish between your interna
 
 If the `trusted_accounts.yaml` file doesn't exist or is empty, the script will analyze all accounts as potential external access points.
 
+## Security Checks Performed
+
+### Confused Deputy Problem Detection
+
+The tool checks if IAM roles with cross-account access are properly protected with an ExternalId condition. The ExternalId condition helps prevent the [confused deputy problem](https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html), which occurs when a third-party (the deputy) is tricked into misusing its access to act on behalf of another account.
+
+Roles that allow external accounts to assume them without an ExternalId condition are flagged as vulnerable in the report.
+
 ## Usage
 
 Simply run the script:
@@ -114,8 +123,9 @@ The script will:
 3. Get the current AWS account alias for better identification
 4. Check all IAM role trust policies in your account
 5. Check all S3 bucket policies in your account
-6. Display the results in a nice format in the console
-7. Generate a markdown report file
+6. Identify IAM roles vulnerable to the confused deputy problem
+7. Display the results in a nice format in the console
+8. Generate a markdown report file
 
 ## Sample Output
 
@@ -155,11 +165,18 @@ Checking S3 bucket policies...
 │ 123456789012    │ SomeUnknownVendorRole                               │
 └────────────────────────────────────────────────────────────────────────┘
 
+┌──── ⚠️ IAM Roles Missing ExternalId Condition (Vulnerable to Confused Deputy) ────┐
+│ Entity         │ Vulnerable IAM Roles                                           │
+│ ───────────────┼───────────────────────────────────────────────────────────     │
+│ Datadog        │ DatadogIntegrationRole                                         │
+└────────────────────────────────────────────────────────────────────────────────┘
+
 ┌────────────────── AWS Account Analysis Results ─────────────────────┐
 │ Summary:                                                            │
 │ 🔒 Trusted entities found: 1                                        │
 │ 🔍 Known vendors found: 1                                           │
 │ ❓ Unknown AWS accounts found: 1                                     │
+│ ⚠️ Vulnerable IAM roles (missing ExternalId): 1                     │
 └────────────────────────────────────────────────────────────────────┘
 
 ✅ Report generated: aws_account_analysis_20230515_123045.md
@@ -172,6 +189,7 @@ The generated markdown report will include:
 - Trusted entities with IAM role access
 - Known vendors with IAM role access
 - Unknown AWS accounts with IAM role access
+- IAM roles missing ExternalId condition (vulnerable to confused deputy)
 - Trusted entities with S3 bucket access
 - Known vendors with S3 bucket access
 - Unknown AWS accounts with S3 bucket access
