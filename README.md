@@ -61,6 +61,11 @@ To run this script successfully, your AWS user or role needs the following permi
       "Effect": "Allow",
       "Action": ["sts:GetCallerIdentity", "iam:ListAccountAliases"],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["organizations:ListAccounts"],
+      "Resource": "*"
     }
   ]
 }
@@ -70,6 +75,7 @@ You can use the AWS built-in policies:
 
 - `IAMReadOnlyAccess` - For IAM role analysis
 - `AmazonS3ReadOnlyAccess` - For S3 bucket policy analysis
+- `AWSOrganizationsReadOnlyAccess` - For AWS Organizations account listing
 
 Or create a custom policy with just the permissions listed above for more restricted access.
 

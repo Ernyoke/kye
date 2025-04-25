@@ -61,45 +61,97 @@ def fetch_reference_data():
         return {}
 
 
-def fetch_trusted_accounts():
+def fetch_org_accounts():
     """
-    Fetch trusted AWS accounts from a local file.
+    Fetch AWS accounts from AWS Organizations API.
 
     Returns:
-        dict: Mapping of trusted AWS account IDs to internal names
+        tuple: (account_to_internal, error_message)
+            account_to_internal (dict): Mapping of AWS account IDs to internal names
+            error_message (str): Error message if any, None if successful
     """
+    try:
+        org_client = boto3.client("organizations")
+        account_to_internal = {}
+
+        # Use paginator to handle large number of accounts
+        paginator = org_client.get_paginator("list_accounts")
+        for page in paginator.paginate():
+            for account in page["Accounts"]:
+                account_id = account["Id"]
+                account_name = account["Name"]
+                account_to_internal[account_id] = {
+                    "name": account_name,
+                    "type": "trusted",
+                    "description": "AWS Organization Account",
+                    "source": "aws_org",
+                }
+
+        console.print(
+            f"[green]✅ Found {len(account_to_internal)} accounts in AWS Organization[/green]"
+        )
+        return account_to_internal, None
+
+    except Exception as e:
+        error_msg = str(e)
+        if "AccessDenied" in error_msg or "UnauthorizedOperation" in error_msg:
+            error_msg = "Access denied to AWS Organizations API. Please ensure you have the required permissions."
+        console.print(
+            f"[bold yellow]Warning: Could not fetch AWS Organization accounts: {error_msg}[/bold yellow]"
+        )
+        return {}, error_msg
+
+
+def fetch_trusted_accounts():
+    """
+    Fetch trusted AWS accounts from both local file and AWS Organizations API.
+
+    Returns:
+        tuple: (trusted_accounts, org_error)
+            trusted_accounts (dict): Mapping of trusted AWS account IDs to internal names
+            org_error (str): Error message from AWS Organizations if any, None if successful
+    """
+    trusted_accounts = {}
+
+    # First try to fetch from AWS Organizations
+    org_accounts, org_error = fetch_org_accounts()
+    trusted_accounts.update(org_accounts)
+
+    # Then try to load from YAML file
     try:
         trusted_accounts_file = "trusted_accounts.yaml"
 
         if not os.path.exists(trusted_accounts_file):
             console.print(
-                "[yellow]No trusted accounts file found. Continuing without trusted zone.[/yellow]"
+                "[yellow]No trusted accounts file found. Using only AWS Organization accounts.[/yellow]"
             )
-            return {}
+            return trusted_accounts, org_error
 
         with open(trusted_accounts_file, "r") as file:
             trusted_data = yaml.safe_load(file) or []
 
         # Create a mapping of account IDs to internal names
-        account_to_internal = {}
         for entity in trusted_data:
             for account_id in entity.get("accounts", []):
-                account_to_internal[account_id] = {
-                    "name": entity.get("name", "Internal"),
-                    "type": "trusted",
-                    "description": entity.get("description", ""),
-                }
+                # Only add if not already present from AWS Organizations
+                if account_id not in trusted_accounts:
+                    trusted_accounts[account_id] = {
+                        "name": entity.get("name", "Internal"),
+                        "type": "trusted",
+                        "description": entity.get("description", ""),
+                        "source": "yaml_file",
+                    }
 
         console.print(
-            f"[green]✅ Loaded {len(account_to_internal)} trusted AWS accounts[/green]"
+            f"[green]✅ Loaded {len(trusted_accounts) - len(org_accounts)} additional trusted AWS accounts from YAML file[/green]"
         )
-        return account_to_internal
+        return trusted_accounts, org_error
 
     except Exception as e:
         console.print(
-            f"[bold yellow]Warning: Could not load trusted accounts: {str(e)}[/bold yellow]"
+            f"[bold yellow]Warning: Could not load trusted accounts from YAML file: {str(e)}[/bold yellow]"
         )
-        return {}
+        return trusted_accounts, org_error
 
 
 def get_account_aliases():
@@ -242,10 +294,6 @@ def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_a
 
     Returns:
         tuple: (known_vendors, unknown_accounts, trusted_entities, vulnerable_roles)
-            known_vendors (dict): Dictionary mapping vendor names to lists of IAM role names
-            unknown_accounts (dict): Dictionary mapping unknown account IDs to lists of IAM role names
-            trusted_entities (dict): Dictionary mapping trusted entity names to lists of IAM role names
-            vulnerable_roles (dict): Dictionary mapping account IDs to roles without ExternalId conditions
     """
     console.print("[bold blue]Checking IAM role trust policies...[/bold blue]")
 
@@ -273,9 +321,23 @@ def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_a
                     # Check if account is in trusted zone
                     if account_id in trusted_accounts:
                         trusted_name = trusted_accounts[account_id]["name"]
+                        source = trusted_accounts[account_id]["source"]
                         if trusted_name not in trusted_entities:
-                            trusted_entities[trusted_name] = []
-                        trusted_entities[trusted_name].append(role_name)
+                            trusted_entities[trusted_name] = {
+                                "roles": [],
+                                "source": source,
+                            }
+                        trusted_entities[trusted_name]["roles"].append(role_name)
+
+                        # Check for missing ExternalId condition for trusted accounts
+                        has_external_id = check_external_id_condition(trust_policy)
+                        if not has_external_id:
+                            if trusted_name not in vulnerable_roles:
+                                vulnerable_roles[trusted_name] = {
+                                    "roles": [],
+                                    "source": source,
+                                }
+                            vulnerable_roles[trusted_name]["roles"].append(role_name)
                     # Check if account is a known vendor
                     elif account_id in account_to_vendor:
                         vendor_name = account_to_vendor[account_id]["name"]
@@ -287,8 +349,11 @@ def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_a
                         has_external_id = check_external_id_condition(trust_policy)
                         if not has_external_id:
                             if vendor_name not in vulnerable_roles:
-                                vulnerable_roles[vendor_name] = []
-                            vulnerable_roles[vendor_name].append(role_name)
+                                vulnerable_roles[vendor_name] = {
+                                    "roles": [],
+                                    "source": "vendor",
+                                }
+                            vulnerable_roles[vendor_name]["roles"].append(role_name)
                     # Add to unknown accounts
                     else:
                         # Format account ID with alias if available
@@ -304,8 +369,11 @@ def check_iam_role_trust_policies(account_to_vendor, trusted_accounts, account_a
                         has_external_id = check_external_id_condition(trust_policy)
                         if not has_external_id:
                             if display_id not in vulnerable_roles:
-                                vulnerable_roles[display_id] = []
-                            vulnerable_roles[display_id].append(role_name)
+                                vulnerable_roles[display_id] = {
+                                    "roles": [],
+                                    "source": "unknown",
+                                }
+                            vulnerable_roles[display_id]["roles"].append(role_name)
 
         return known_vendors, unknown_accounts, trusted_entities, vulnerable_roles
 
@@ -327,9 +395,6 @@ def check_s3_bucket_policies(account_to_vendor, trusted_accounts, account_aliase
 
     Returns:
         tuple: (known_vendors, unknown_accounts, trusted_entities)
-            known_vendors (dict): Dictionary mapping vendor names to lists of bucket names
-            unknown_accounts (dict): Dictionary mapping unknown account IDs to lists of bucket names
-            trusted_entities (dict): Dictionary mapping trusted entity names to lists of bucket names
     """
     console.print("[bold blue]Checking S3 bucket policies...[/bold blue]")
 
@@ -355,9 +420,13 @@ def check_s3_bucket_policies(account_to_vendor, trusted_accounts, account_aliase
                     # Check if account is in trusted zone
                     if account_id in trusted_accounts:
                         trusted_name = trusted_accounts[account_id]["name"]
+                        source = trusted_accounts[account_id]["source"]
                         if trusted_name not in trusted_entities:
-                            trusted_entities[trusted_name] = []
-                        trusted_entities[trusted_name].append(bucket_name)
+                            trusted_entities[trusted_name] = {
+                                "buckets": [],
+                                "source": source,
+                            }
+                        trusted_entities[trusted_name]["buckets"].append(bucket_name)
                     # Check if account is a known vendor
                     elif account_id in account_to_vendor:
                         vendor_name = account_to_vendor[account_id]["name"]
@@ -402,6 +471,7 @@ def generate_report(
     s3_unknown_accounts,
     s3_trusted_entities,
     account_aliases,
+    org_error=None,
 ):
     """
     Generate a report with the findings.
@@ -415,9 +485,7 @@ def generate_report(
         s3_unknown_accounts (dict): Unknown accounts found in S3 bucket policies
         s3_trusted_entities (dict): Trusted entities found in S3 bucket policies
         account_aliases (dict): Mapping of AWS account IDs to their aliases
-
-    Returns:
-        str: The path to the generated report
+        org_error (str): Error message from AWS Organizations if any
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -434,13 +502,29 @@ def generate_report(
         f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Account: {current_account_id} ({current_account_alias})\n\n")
 
+        # Add AWS Organizations access status
+        if org_error:
+            f.write("## ⚠️ AWS Organizations Access\n\n")
+            f.write(f"Could not access AWS Organizations API: {org_error}\n")
+            f.write(
+                "\nThis means the report may be missing trusted accounts from your AWS Organization.\n"
+            )
+            f.write(
+                "To fix this, ensure your IAM user/role has the `organizations:ListAccounts` permission.\n\n"
+            )
+
+        # IAM Roles Section
+        f.write("# IAM Roles Analysis\n\n")
+
         # Write IAM trusted entities section
         f.write("## Trusted Entities with IAM Role Access\n\n")
         if iam_trusted_entities:
-            f.write("| Entity | IAM Roles |\n")
-            f.write("|--------|----------|\n")
-            for entity, roles in iam_trusted_entities.items():
-                f.write(f"| {entity} | {', '.join(roles)} |\n")
+            f.write("| Entity | Source | IAM Roles |\n")
+            f.write("|--------|--------|----------|\n")
+            for entity, data in iam_trusted_entities.items():
+                f.write(
+                    f"| {entity} | {data['source']} | {', '.join(data['roles'])} |\n"
+                )
         else:
             f.write("No trusted entities found in IAM role trust policies.\n")
         f.write("\n")
@@ -459,10 +543,11 @@ def generate_report(
         # Write IAM unknown accounts section
         f.write("## Unknown AWS Accounts with IAM Role Access\n\n")
         if iam_unknown_accounts:
-            f.write("| AWS Account ID | IAM Roles |\n")
-            f.write("|---------------|----------|\n")
+            f.write("| AWS Account ID | Account Name | IAM Roles |\n")
+            f.write("|---------------|------------|----------|\n")
             for account_id, roles in iam_unknown_accounts.items():
-                f.write(f"| {account_id} | {', '.join(roles)} |\n")
+                account_name = account_aliases.get(account_id, "Unknown")
+                f.write(f"| {account_id} | {account_name} | {', '.join(roles)} |\n")
         else:
             f.write("No unknown AWS accounts found in IAM role trust policies.\n")
         f.write("\n")
@@ -473,21 +558,28 @@ def generate_report(
             "These roles are vulnerable to the [confused deputy problem](https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html).\n\n"
         )
         if iam_vulnerable_roles:
-            f.write("| Entity | Vulnerable IAM Roles |\n")
-            f.write("|--------|--------------------|\n")
-            for entity, roles in iam_vulnerable_roles.items():
-                f.write(f"| {entity} | {', '.join(roles)} |\n")
+            f.write("| Entity | Source | Vulnerable IAM Roles |\n")
+            f.write("|--------|--------|--------------------|\n")
+            for entity, data in iam_vulnerable_roles.items():
+                f.write(
+                    f"| {entity} | {data['source']} | {', '.join(data['roles'])} |\n"
+                )
         else:
             f.write("No vulnerable IAM roles found (good job!).\n")
         f.write("\n")
 
+        # S3 Bucket Policies Section
+        f.write("# S3 Bucket Policies Analysis\n\n")
+
         # Write S3 trusted entities section
         f.write("## Trusted Entities with S3 Bucket Access\n\n")
         if s3_trusted_entities:
-            f.write("| Entity | S3 Buckets |\n")
-            f.write("|--------|----------|\n")
-            for entity, buckets in s3_trusted_entities.items():
-                f.write(f"| {entity} | {', '.join(buckets)} |\n")
+            f.write("| Entity | Source | S3 Buckets |\n")
+            f.write("|--------|--------|----------|\n")
+            for entity, data in s3_trusted_entities.items():
+                f.write(
+                    f"| {entity} | {data['source']} | {', '.join(data['buckets'])} |\n"
+                )
         else:
             f.write("No trusted entities found in S3 bucket policies.\n")
         f.write("\n")
@@ -506,10 +598,11 @@ def generate_report(
         # Write S3 unknown accounts section
         f.write("## Unknown AWS Accounts with S3 Bucket Access\n\n")
         if s3_unknown_accounts:
-            f.write("| AWS Account ID | S3 Buckets |\n")
-            f.write("|---------------|----------|\n")
+            f.write("| AWS Account ID | Account Name | S3 Buckets |\n")
+            f.write("|---------------|------------|----------|\n")
             for account_id, buckets in s3_unknown_accounts.items():
-                f.write(f"| {account_id} | {', '.join(buckets)} |\n")
+                account_name = account_aliases.get(account_id, "Unknown")
+                f.write(f"| {account_id} | {account_name} | {', '.join(buckets)} |\n")
         else:
             f.write("No unknown AWS accounts found in S3 bucket policies.\n")
 
@@ -553,11 +646,15 @@ def display_results(
     if iam_trusted_entities:
         table = Table(title="🔒 Trusted Entities with IAM Role Access", box=box.ROUNDED)
         table.add_column("Entity", style="green")
+        table.add_column("Source", style="blue")
         table.add_column("IAM Roles", style="blue")
 
-        for entity, roles in iam_trusted_entities.items():
+        for entity, data in iam_trusted_entities.items():
             table.add_row(
-                entity, "\n".join(roles[:5]) + ("\n..." if len(roles) > 5 else "")
+                entity,
+                data["source"],
+                "\n".join(data["roles"][:5])
+                + ("\n..." if len(data["roles"]) > 5 else ""),
             )
 
         console.print(table)
@@ -581,11 +678,16 @@ def display_results(
             title="❓ Unknown AWS Accounts with IAM Role Access", box=box.ROUNDED
         )
         table.add_column("AWS Account ID", style="yellow")
+        table.add_column("Account Name", style="blue")
         table.add_column("IAM Roles", style="green")
 
         for account_id, roles in iam_unknown_accounts.items():
+            # Get account name from AWS Organizations if available
+            account_name = account_aliases.get(account_id, "Unknown")
             table.add_row(
-                account_id, "\n".join(roles[:5]) + ("\n..." if len(roles) > 5 else "")
+                account_id,
+                account_name,
+                "\n".join(roles[:5]) + ("\n..." if len(roles) > 5 else ""),
             )
 
         console.print(table)
@@ -597,11 +699,15 @@ def display_results(
             box=box.ROUNDED,
         )
         table.add_column("Entity", style="red")
+        table.add_column("Source", style="blue")
         table.add_column("Vulnerable IAM Roles", style="red")
 
-        for entity, roles in iam_vulnerable_roles.items():
+        for entity, data in iam_vulnerable_roles.items():
             table.add_row(
-                entity, "\n".join(roles[:5]) + ("\n..." if len(roles) > 5 else "")
+                entity,
+                data["source"],
+                "\n".join(data["roles"][:5])
+                + ("\n..." if len(data["roles"]) > 5 else ""),
             )
 
         console.print(table)
@@ -612,11 +718,15 @@ def display_results(
             title="🔒 Trusted Entities with S3 Bucket Access", box=box.ROUNDED
         )
         table.add_column("Entity", style="green")
+        table.add_column("Source", style="blue")
         table.add_column("S3 Buckets", style="blue")
 
-        for entity, buckets in s3_trusted_entities.items():
+        for entity, data in s3_trusted_entities.items():
             table.add_row(
-                entity, "\n".join(buckets[:5]) + ("\n..." if len(buckets) > 5 else "")
+                entity,
+                data["source"],
+                "\n".join(data["buckets"][:5])
+                + ("\n..." if len(data["buckets"]) > 5 else ""),
             )
 
         console.print(table)
@@ -640,11 +750,15 @@ def display_results(
             title="❓ Unknown AWS Accounts with S3 Bucket Access", box=box.ROUNDED
         )
         table.add_column("AWS Account ID", style="yellow")
+        table.add_column("Account Name", style="blue")
         table.add_column("S3 Buckets", style="green")
 
         for account_id, buckets in s3_unknown_accounts.items():
+            # Get account name from AWS Organizations if available
+            account_name = account_aliases.get(account_id, "Unknown")
             table.add_row(
                 account_id,
+                account_name,
                 "\n".join(buckets[:5]) + ("\n..." if len(buckets) > 5 else ""),
             )
 
@@ -694,7 +808,7 @@ def main():
 
         # Fetch trusted accounts
         console.print("[bold]Loading trusted AWS accounts...[/bold]")
-        trusted_accounts = fetch_trusted_accounts()
+        trusted_accounts, org_error = fetch_trusted_accounts()
 
         # Get account aliases
         account_aliases = get_account_aliases()
@@ -738,6 +852,7 @@ def main():
             s3_unknown_accounts,
             s3_trusted_entities,
             account_aliases,
+            org_error,
         )
         console.print(f"[bold green]✅ Report generated: {report_file}[/bold green]")
 
