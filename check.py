@@ -420,13 +420,14 @@ def generate_report(
         str: The path to the generated report
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_file = f"aws_account_analysis_{timestamp}.md"
 
     # Get current account info
     current_account_id = (
         list(account_aliases.keys())[0] if account_aliases else "Unknown"
     )
     current_account_alias = account_aliases.get(current_account_id, current_account_id)
+
+    report_file = f"aws_account_analysis_{current_account_id}_{timestamp}.md"
 
     with open(report_file, "w") as f:
         f.write("# AWS Account Access Analysis Report\n\n")
